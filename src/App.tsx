@@ -146,7 +146,7 @@ export default function App() {
   const [isPaused, setIsPaused] = useState(false);
   const pausedRef = useRef(false);
   const pointerY = useRef<number | null>(null);
-  const pointerAction = useRef(false);
+  const actionPending = useRef(false);
 
   // Latest state ref to avoid stale closures and effect re-runs
   const latestState = useRef({
@@ -286,7 +286,7 @@ export default function App() {
     keysPressed.current.clear();
     playerY.current = aiY.current = CANVAS_HEIGHT / 2 - PADDLE_HEIGHT / 2;
     lastSpacePressed.current = false;
-    pointerAction.current = false;
+    actionPending.current = false;
     setNotifications([]);
     canvasRef.current?.focus();
     setPlayerScore(0);
@@ -326,7 +326,13 @@ export default function App() {
         setGameState('START');
         setIsAiMode(false);
       }
-      if (!pausedRef.current && ['w', 's', 'ArrowUp', 'ArrowDown', ' '].includes(key)) keysPressed.current.add(key);
+      if (!pausedRef.current && ['w', 's', 'ArrowUp', 'ArrowDown', ' '].includes(key)) {
+        keysPressed.current.add(key);
+        if (latestState.current.gameState === 'PLAYING' && !latestState.current.isAiMode) {
+          if (latestState.current.isServing && latestState.current.currentServer === 'PLAYER') setIsServing(false);
+          if (key === ' ' && !e.repeat) actionPending.current = true;
+        }
+      }
     };
     const handleKeyUp = (e: KeyboardEvent) => keysPressed.current.delete(e.key.length === 1 ? e.key.toLowerCase() : e.key);
     const handleBlur = () => { if (latestState.current.gameState === 'PLAYING') pause(true); };
@@ -365,8 +371,8 @@ export default function App() {
         aiScore: currentAiScore
       } = latestState.current;
 
-      const tapped = pointerAction.current;
-      pointerAction.current = false;
+      const tapped = actionPending.current;
+      actionPending.current = false;
       if (tapped) keysPressed.current.add(' ');
 
       // Serve Mechanic
@@ -958,7 +964,7 @@ export default function App() {
             event.currentTarget.focus();
             event.currentTarget.setPointerCapture(event.pointerId);
             movePointer(event);
-            if (!pausedRef.current && gameState === 'PLAYING' && !isAiMode) pointerAction.current = true;
+            if (!pausedRef.current && gameState === 'PLAYING' && !isAiMode) actionPending.current = true;
           }}
           onPointerMove={event => { if (event.buttons || event.pointerType === 'touch') movePointer(event); }}
           onPointerUp={() => { keysPressed.current.delete(' '); pointerY.current = null; }}
