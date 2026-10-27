@@ -5,7 +5,7 @@
 
 import React, { useEffect, useRef, useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Play, RotateCcw, Trophy, Cpu, User, Volume2, VolumeX, Heart } from 'lucide-react';
+import { Play, RotateCcw, Trophy, Cpu, User, Volume2, VolumeX, Pause } from 'lucide-react';
 
 // --- Constants ---
 const CANVAS_WIDTH = 800;
@@ -135,6 +135,19 @@ export default function App() {
 
   const [isAiMode, setIsAiMode] = useState(false);
 
+  const [activePowerUps, setActivePowerUps] = useState<{
+    player: { big: number; magnet: boolean; multiplier: number; laser: number };
+    ai: { big: number; magnet: boolean; multiplier: number; laser: number };
+  }>({
+    player: { big: 0, magnet: false, multiplier: 0, laser: 0 },
+    ai: { big: 0, magnet: false, multiplier: 0, laser: 0 }
+  });
+
+  const [isPaused, setIsPaused] = useState(false);
+  const pausedRef = useRef(false);
+  const pointerY = useRef<number | null>(null);
+  const actionPending = useRef(false);
+
   // Latest state ref to avoid stale closures and effect re-runs
   const latestState = useRef({
     gameState,
@@ -171,13 +184,7 @@ export default function App() {
       setNotifications(prev => prev.filter(n => n.id !== id));
     }, 2000);
   };
-  const [activePowerUps, setActivePowerUps] = useState<{
-    player: { big: number; magnet: boolean; multiplier: number; laser: number };
-    ai: { big: number; magnet: boolean; multiplier: number; laser: number };
-  }>({
-    player: { big: 0, magnet: false, multiplier: 0, laser: 0 },
-    ai: { big: 0, magnet: false, multiplier: 0, laser: 0 }
-  });
+
 
   // Game state refs to avoid closure issues in the loop
   const ballPos = useRef({ x: PADDLE_WIDTH + 5, y: CANVAS_HEIGHT / 2 });
@@ -232,7 +239,7 @@ export default function App() {
     bricks.current = newBricks;
   };
 
-  const resetBall = (server: 'PLAYER' | 'AI') => {
+  const resetBall = (server: 'PLAYER' | 'AI', ballLevel = latestState.current.level) => {
     setIsServing(true);
     setCurrentServer(server);
     serveTimer.current = 0;
@@ -243,7 +250,7 @@ export default function App() {
       ai: { big: 0, magnet: false, multiplier: 0, laser: 0 }
     });
     
-    const currentBallSpeed = INITIAL_BALL_SPEED * (1 + (level - 1) * 0.5 / 9);
+    const currentBallSpeed = INITIAL_BALL_SPEED * (1 + (ballLevel - 1) * 0.5 / 9);
 
     if (server === 'PLAYER') {
       ballPos.current = { 
@@ -273,6 +280,15 @@ export default function App() {
   };
 
   const startGame = (aiMode: boolean = false) => {
+    pausedRef.current = false;
+    setIsPaused(false);
+    pointerY.current = null;
+    keysPressed.current.clear();
+    playerY.current = aiY.current = CANVAS_HEIGHT / 2 - PADDLE_HEIGHT / 2;
+    lastSpacePressed.current = false;
+    actionPending.current = false;
+    setNotifications([]);
+    canvasRef.current?.focus();
     setPlayerScore(0);
     setAiScore(0);
     setWinner(null);
@@ -281,27 +297,55 @@ export default function App() {
     setGameState('PLAYING');
     setIsServing(true);
     setIsAiMode(aiMode);
-    resetBall('PLAYER');
+    resetBall('PLAYER', 1);
+  };
+
+  const pause = (value: boolean) => {
+    pausedRef.current = value;
+    setIsPaused(value);
+    keysPressed.current.clear();
+    pointerY.current = null;
+    if (!value) canvasRef.current?.focus();
+  };
+
+  const movePointer = (event: React.PointerEvent<HTMLCanvasElement>) => {
+    if (latestState.current.gameState !== 'PLAYING' || pausedRef.current || latestState.current.isAiMode) return;
+    const bounds = event.currentTarget.getBoundingClientRect();
+    pointerY.current = (event.clientY - bounds.top) * CANVAS_HEIGHT / bounds.height;
+    const height = latestState.current.activePowerUps.player.big > 0 ? PADDLE_HEIGHT * 1.5 : PADDLE_HEIGHT;
+    playerY.current = Math.max(0, Math.min(CANVAS_HEIGHT - height, pointerY.current - height / 2));
   };
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      keysPressed.current.add(e.key);
-      if (e.key.toLowerCase() === 'e') {
-        if (isAiMode) {
-          setGameState('START');
-          setIsAiMode(false);
+      if (e.target instanceof HTMLElement && e.target.closest('button, input, textarea, a')) return;
+      const key = e.key.length === 1 ? e.key.toLowerCase() : e.key;
+      if (['ArrowUp', 'ArrowDown', ' '].includes(key)) e.preventDefault();
+      if (key === 'p' && !e.repeat && latestState.current.gameState === 'PLAYING') pause(!pausedRef.current);
+      if (key === 'e' && latestState.current.isAiMode) {
+        setGameState('START');
+        setIsAiMode(false);
+      }
+      if (!pausedRef.current && ['w', 's', 'ArrowUp', 'ArrowDown', ' '].includes(key)) {
+        keysPressed.current.add(key);
+        if (latestState.current.gameState === 'PLAYING' && !latestState.current.isAiMode) {
+          if (latestState.current.isServing && latestState.current.currentServer === 'PLAYER') setIsServing(false);
+          if (key === ' ' && !e.repeat) actionPending.current = true;
         }
       }
     };
-    const handleKeyUp = (e: KeyboardEvent) => keysPressed.current.delete(e.key);
-
+    const handleKeyUp = (e: KeyboardEvent) => keysPressed.current.delete(e.key.length === 1 ? e.key.toLowerCase() : e.key);
+    const handleBlur = () => { if (latestState.current.gameState === 'PLAYING') pause(true); };
+    const handleVisibility = () => { if (document.hidden) handleBlur(); };
     window.addEventListener('keydown', handleKeyDown);
     window.addEventListener('keyup', handleKeyUp);
-
+    window.addEventListener('blur', handleBlur);
+    document.addEventListener('visibilitychange', handleVisibility);
     return () => {
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('keyup', handleKeyUp);
+      window.removeEventListener('blur', handleBlur);
+      document.removeEventListener('visibilitychange', handleVisibility);
     };
   }, []);
 
@@ -326,6 +370,10 @@ export default function App() {
         playerScore: currentPlayerScore,
         aiScore: currentAiScore
       } = latestState.current;
+
+      const tapped = actionPending.current;
+      actionPending.current = false;
+      if (tapped) keysPressed.current.add(' ');
 
       // Serve Mechanic
       const playerPaddleHeight = currentPowerUps.player.big > 0 ? PADDLE_HEIGHT * 1.5 : PADDLE_HEIGHT;
@@ -380,6 +428,10 @@ export default function App() {
         }
       }
 
+      if (pointerY.current !== null && !currentAiMode) {
+        playerY.current = Math.max(0, Math.min(CANVAS_HEIGHT - playerPaddleHeight, pointerY.current - playerPaddleHeight / 2));
+      }
+
       // Player Movement
       if (currentAiMode) {
         if (!currentIsServing && !isBallMagnetized.current) {
@@ -410,8 +462,8 @@ export default function App() {
       }
 
       // Laser Shooting
-      if (activePowerUps.player.laser > 0) {
-        if (isAiMode) {
+      if (currentPowerUps.player.laser > 0) {
+        if (currentAiMode) {
           if (Math.random() < 0.05) {
             lasers.current.push({
               x: PADDLE_WIDTH,
@@ -419,7 +471,7 @@ export default function App() {
               vx: 10,
               owner: 'PLAYER'
             });
-            if (!isMuted) sound.playLaser();
+            if (!currentIsMuted) sound.playLaser();
           }
         } else {
           const isSpacePressed = keysPressed.current.has(' ');
@@ -430,13 +482,13 @@ export default function App() {
               vx: 10,
               owner: 'PLAYER'
             });
-            if (!isMuted) sound.playLaser();
+            if (!currentIsMuted) sound.playLaser();
           }
           lastSpacePressed.current = isSpacePressed;
         }
       }
 
-      if (activePowerUps.ai.laser > 0) {
+      if (currentPowerUps.ai.laser > 0) {
         if (Math.random() < 0.05) {
           lasers.current.push({
             x: CANVAS_WIDTH - PADDLE_WIDTH,
@@ -444,7 +496,7 @@ export default function App() {
             vx: -10,
             owner: 'AI'
           });
-          if (!isMuted) sound.playLaser();
+          if (!currentIsMuted) sound.playLaser();
         }
       }
 
@@ -459,14 +511,14 @@ export default function App() {
             laser.y <= brick.y + BRICK_HEIGHT
           ) {
             brick.active = false;
-            if (!isMuted) sound.playBrick();
+            if (!currentIsMuted) sound.playBrick();
             if (laser.owner === 'PLAYER') {
               const points = brick.type === 'GOLDEN' ? 10 : 1;
-              const multiplier = activePowerUps.player.multiplier > 0 ? 3 : 1;
+              const multiplier = currentPowerUps.player.multiplier > 0 ? 3 : 1;
               setPlayerScore(s => s + points * multiplier);
             } else {
               const points = brick.type === 'GOLDEN' ? 10 : 1;
-              const multiplier = activePowerUps.ai.multiplier > 0 ? 3 : 1;
+              const multiplier = currentPowerUps.ai.multiplier > 0 ? 3 : 1;
               setAiScore(s => s + points * multiplier);
             }
             return false;
@@ -476,7 +528,7 @@ export default function App() {
       });
 
       // Ball Movement
-      if (!isServing && !isBallMagnetized.current) {
+      if (!currentIsServing && !isBallMagnetized.current) {
         ballPos.current.x += ballVel.current.x;
         ballPos.current.y += ballVel.current.y;
       }
@@ -501,11 +553,11 @@ export default function App() {
       if (ballPos.current.y <= 0) {
         ballPos.current.y = 0;
         ballVel.current.y *= -1;
-        if (!isMuted) sound.playWall();
+        if (!currentIsMuted) sound.playWall();
       } else if (ballPos.current.y >= CANVAS_HEIGHT - BALL_SIZE) {
         ballPos.current.y = CANVAS_HEIGHT - BALL_SIZE;
         ballVel.current.y *= -1;
-        if (!isMuted) sound.playWall();
+        if (!currentIsMuted) sound.playWall();
       }
 
       // Brick Collisions
@@ -539,11 +591,11 @@ export default function App() {
 
           if (lastHitter.current === 'PLAYER') {
             const points = brick.type === 'GOLDEN' ? 10 : 1;
-            const multiplier = activePowerUps.player.multiplier > 0 ? 3 : 1;
+            const multiplier = currentPowerUps.player.multiplier > 0 ? 3 : 1;
             setPlayerScore((s) => s + points * multiplier);
             
             if (brick.type !== 'NORMAL') {
-              if (!isMuted) sound.playPowerUp();
+              if (!currentIsMuted) sound.playPowerUp();
               if (brick.type === 'BIG_PADDLE') setActivePowerUps(p => ({ ...p, player: { ...p.player, big: 600 } })); // 10s
               if (brick.type === 'MAGNET') setActivePowerUps(p => ({ ...p, player: { ...p.player, magnet: true } }));
               if (brick.type === 'MULTIPLIER') setActivePowerUps(p => ({ ...p, player: { ...p.player, multiplier: 600 } })); // 10s
@@ -551,11 +603,11 @@ export default function App() {
             }
           } else {
             const points = brick.type === 'GOLDEN' ? 10 : 1;
-            const multiplier = activePowerUps.ai.multiplier > 0 ? 3 : 1;
+            const multiplier = currentPowerUps.ai.multiplier > 0 ? 3 : 1;
             setAiScore((s) => s + points * multiplier);
             
             if (brick.type !== 'NORMAL') {
-              if (!isMuted) sound.playPowerUp();
+              if (!currentIsMuted) sound.playPowerUp();
               if (brick.type === 'BIG_PADDLE') setActivePowerUps(p => ({ ...p, ai: { ...p.ai, big: 600 } }));
               if (brick.type === 'MAGNET') setActivePowerUps(p => ({ ...p, ai: { ...p.ai, magnet: true } }));
               if (brick.type === 'MULTIPLIER') setActivePowerUps(p => ({ ...p, ai: { ...p.ai, multiplier: 600 } }));
@@ -563,7 +615,7 @@ export default function App() {
             }
           }
           
-          if (!isMuted) sound.playBrick();
+          if (!currentIsMuted) sound.playBrick();
           
           break; // Only hit one brick per frame
         }
@@ -576,7 +628,7 @@ export default function App() {
         ballPos.current.y + BALL_SIZE >= playerY.current &&
         ballPos.current.y <= playerY.current + playerPaddleHeight
       ) {
-        if (activePowerUps.player.magnet) {
+        if (currentPowerUps.player.magnet) {
           isBallMagnetized.current = true;
           magnetTimer.current = ballPos.current.y - playerY.current;
           setActivePowerUps(p => ({ ...p, player: { ...p.player, magnet: false } }));
@@ -597,7 +649,7 @@ export default function App() {
         ballColor.current = '#00f2ff'; // Cyan/Blue
         lastHitter.current = 'PLAYER';
         
-        if (!isMuted) sound.playHit();
+        if (!currentIsMuted) sound.playHit();
       }
 
       // AI Paddle
@@ -606,7 +658,7 @@ export default function App() {
         ballPos.current.y + BALL_SIZE >= aiY.current &&
         ballPos.current.y <= aiY.current + aiPaddleHeight
       ) {
-        if (activePowerUps.ai.magnet) {
+        if (currentPowerUps.ai.magnet) {
           isBallMagnetized.current = true;
           magnetTimer.current = ballPos.current.y - aiY.current;
           setActivePowerUps(p => ({ ...p, ai: { ...p.ai, magnet: false } }));
@@ -627,38 +679,40 @@ export default function App() {
         ballColor.current = '#ff007a'; // Pink/Red
         lastHitter.current = 'AI';
         
-        if (!isMuted) sound.playHit();
+        if (!currentIsMuted) sound.playHit();
       }
 
       // Scoring / Lives
       if (ballPos.current.x <= 0) {
-        if (!isMuted) sound.playScore();
+        if (!currentIsMuted) sound.playScore();
         resetBall('AI'); // Switch serve to AI
       } else if (ballPos.current.x >= CANVAS_WIDTH) {
-        if (!isMuted) sound.playScore();
+        if (!currentIsMuted) sound.playScore();
         resetBall('PLAYER'); // Switch serve to Player
       }
+
+      if (tapped) keysPressed.current.delete(' ');
 
       // Check for game over or next level (all bricks gone)
       const activeBricks = bricks.current.filter(b => b.active).length;
       if (activeBricks === 0 && gameState === 'PLAYING') {
-        if (level < 10) {
-          const nextLevel = level + 1;
+        if (currentLevel < 10) {
+          const nextLevel = currentLevel + 1;
           setLevel(nextLevel);
           initBricks(nextLevel);
-          resetBall(currentServer);
+          resetBall(currentServerVal, nextLevel);
           addNotification(`LEVEL ${nextLevel}`, '#ffffff');
         } else {
-          if (isAiMode) {
+          if (currentAiMode) {
             // Restart from level 1
             setLevel(1);
             initBricks(1);
-            resetBall('PLAYER');
+            resetBall('PLAYER', 1);
             addNotification('AI MODE RESTART', '#ffffff');
           } else {
-            setWinner(playerScore >= aiScore ? 'PLAYER' : 'AI');
+            setWinner(currentPlayerScore >= currentAiScore ? 'PLAYER' : 'AI');
             setGameState('GAME_OVER');
-            if (!isMuted) sound.playGameOver(playerScore >= aiScore);
+            if (!currentIsMuted) sound.playGameOver(currentPlayerScore >= currentAiScore);
           }
         }
       }
@@ -732,13 +786,13 @@ export default function App() {
       // Player Paddle
       ctx.fillStyle = '#00f2ff'; // Neon Cyan for Player
       ctx.shadowColor = '#00f2ff';
-      const playerPaddleHeightDraw = activePowerUps.player.big > 0 ? PADDLE_HEIGHT * 1.5 : PADDLE_HEIGHT;
+      const playerPaddleHeightDraw = latestState.current.activePowerUps.player.big > 0 ? PADDLE_HEIGHT * 1.5 : PADDLE_HEIGHT;
       ctx.fillRect(0, playerY.current, PADDLE_WIDTH, playerPaddleHeightDraw);
       
       // AI Paddle
       ctx.fillStyle = '#ff007a'; // Neon Pink for AI
       ctx.shadowColor = '#ff007a';
-      const aiPaddleHeightDraw = activePowerUps.ai.big > 0 ? PADDLE_HEIGHT * 1.5 : PADDLE_HEIGHT;
+      const aiPaddleHeightDraw = latestState.current.activePowerUps.ai.big > 0 ? PADDLE_HEIGHT * 1.5 : PADDLE_HEIGHT;
       ctx.fillRect(CANVAS_WIDTH - PADDLE_WIDTH, aiY.current, PADDLE_WIDTH, aiPaddleHeightDraw);
 
       // Draw Lasers
@@ -761,32 +815,46 @@ export default function App() {
       ctx.shadowBlur = 0;
     };
 
-    const loop = () => {
-      update();
-      draw();
+    let previous = 0;
+    let elapsed = 0;
+    const loop = (timestamp: number) => {
+      const delta = previous ? Math.min(timestamp - previous, 50) : 0;
+      previous = timestamp;
+      if (!pausedRef.current) {
+        elapsed += delta;
+        // Keep the original 60 Hz physics on high-refresh screens.
+        while (elapsed >= 1000 / 60) {
+          update();
+          elapsed -= 1000 / 60;
+        }
+        draw();
+      } else elapsed = 0;
       animationFrameId = requestAnimationFrame(loop);
     };
 
-    loop();
+    animationFrameId = requestAnimationFrame(loop);
 
     return () => cancelAnimationFrame(animationFrameId);
   }, [gameState]);
 
   return (
-    <div className="min-h-screen bg-[#050505] text-white flex flex-col items-center justify-center font-sans overflow-hidden">
+    <div className="game-shell bg-[#050505] text-white flex flex-col items-center justify-center font-sans">
       {/* Mute Toggle */}
-      <div className="absolute top-8 right-8">
+      <div className="game-toolbar">
+        {gameState === 'PLAYING' && <button onClick={() => pause(!pausedRef.current)} aria-label={isPaused ? "Resume game" : "Pause game"}>{isPaused ? <Play size={20} /> : <Pause size={20} />}</button>}
+        {gameState !== 'START' && <button onClick={() => { setGameState('START'); setIsAiMode(false); }} aria-label="Back to menu"><RotateCcw size={20} /></button>}
         <button 
           onClick={() => setIsMuted(!isMuted)}
           className="p-3 rounded-full bg-white/5 hover:bg-white/10 border border-white/10 transition-colors text-white/50 hover:text-white"
           title={isMuted ? "Unmute" : "Mute"}
+          aria-label={isMuted ? "Unmute" : "Mute"}
         >
           {isMuted ? <VolumeX size={20} /> : <Volume2 size={20} />}
         </button>
       </div>
 
       {/* Header / Scoreboard */}
-      <div className="mb-8 flex items-center gap-12">
+      <div className="scoreboard flex items-center">
         <div className="flex flex-col items-center">
           <div className="flex items-center gap-2 text-cyan-400 mb-1">
             {isAiMode ? <Cpu size={16} /> : <User size={16} />}
@@ -796,13 +864,13 @@ export default function App() {
             key={playerScore}
             initial={{ scale: 1.5, opacity: 0 }}
             animate={{ scale: 1, opacity: 1 }}
-            className="text-6xl font-black font-mono text-cyan-400"
+            className="score-value font-black font-mono text-cyan-400"
           >
             {playerScore}
           </motion.span>
 
           {/* Player Power-up Status */}
-          <div className="mt-2 flex flex-col gap-1 items-center h-12">
+          <div className="power-ups flex flex-col items-center">
             {activePowerUps.player.big > 0 && (
               <div className="flex items-center gap-2 text-green-400 font-mono text-[9px] uppercase font-bold">
                 <div className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" />
@@ -824,18 +892,18 @@ export default function App() {
           </div>
         </div>
 
-        <div className="flex flex-col items-center px-6 border-x border-white/10">
+        <div className="level-display flex flex-col items-center border-x border-white/10">
           <span className="text-[10px] uppercase tracking-[0.3em] font-bold text-white/30 mb-1">Level</span>
           <motion.span 
             key={level}
             initial={{ y: -20, opacity: 0 }}
             animate={{ y: 0, opacity: 1 }}
-            className="text-4xl font-black font-mono text-white"
+            className="level-value font-black font-mono text-white"
           >
             {level}
           </motion.span>
           <span className="text-[10px] uppercase tracking-[0.3em] font-bold text-white/30 mt-1">of 10</span>
-          <span className="text-6xl font-black font-mono text-white mt-4 tracking-tighter italic uppercase">Ponganoid</span>
+          <span className="game-title font-black font-mono text-white tracking-tighter italic uppercase">Ponganoid</span>
         </div>
 
         <div className="flex flex-col items-center">
@@ -847,13 +915,13 @@ export default function App() {
             key={aiScore}
             initial={{ scale: 1.5, opacity: 0 }}
             animate={{ scale: 1, opacity: 1 }}
-            className="text-6xl font-black font-mono text-pink-500"
+            className="score-value font-black font-mono text-pink-500"
           >
             {aiScore}
           </motion.span>
 
           {/* AI Power-up Status */}
-          <div className="mt-2 flex flex-col gap-1 items-center h-12">
+          <div className="power-ups flex flex-col items-center">
             {activePowerUps.ai.big > 0 && (
               <div className="flex items-center gap-2 text-green-400 font-mono text-[9px] uppercase font-bold">
                 <div className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" />
@@ -878,7 +946,7 @@ export default function App() {
 
       {/* Game Container */}
       <motion.div 
-        className="relative group"
+        className="game-board relative group"
         animate={isShaking ? {
           x: [0, -10, 10, -10, 10, 0],
           y: [0, 5, -5, 5, -5, 0],
@@ -890,6 +958,17 @@ export default function App() {
           width={CANVAS_WIDTH}
           height={CANVAS_HEIGHT}
           className="rounded-xl border border-white/10 shadow-2xl shadow-cyan-500/10 bg-black"
+          tabIndex={0}
+          aria-label="Ponganoid playfield. Move with W and S, arrow keys, or drag. Space serves or fires. P pauses."
+          onPointerDown={event => {
+            event.currentTarget.focus();
+            event.currentTarget.setPointerCapture(event.pointerId);
+            movePointer(event);
+            if (!pausedRef.current && gameState === 'PLAYING' && !isAiMode) actionPending.current = true;
+          }}
+          onPointerMove={event => { if (event.buttons || event.pointerType === 'touch') movePointer(event); }}
+          onPointerUp={() => { keysPressed.current.delete(' '); pointerY.current = null; }}
+          onPointerCancel={() => { keysPressed.current.clear(); pointerY.current = null; }}
         />
 
         {/* Notifications */}
@@ -914,7 +993,7 @@ export default function App() {
 
         {/* Overlays */}
         <AnimatePresence>
-          {gameState === 'PLAYING' && isServing && (
+          {gameState === 'PLAYING' && isServing && !isPaused && (
             <motion.div 
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
@@ -922,13 +1001,13 @@ export default function App() {
             >
               <div className="bg-black/40 backdrop-blur-[2px] px-6 py-3 rounded-full border border-white/10">
                 <p className={`${currentServer === 'PLAYER' ? 'text-cyan-400' : 'text-pink-500'} font-mono text-xs uppercase tracking-[0.3em] font-bold animate-pulse`}>
-                  {currentServer === 'PLAYER' ? 'Press any key to serve' : 'AI Bot is serving...'}
+                  {currentServer === 'PLAYER' ? 'Press Space or tap to serve' : 'AI Bot is serving...'}
                 </p>
               </div>
             </motion.div>
           )}
 
-          {gameState === 'PLAYING' && isBallMagnetized.current && lastHitter.current === 'PLAYER' && (
+          {gameState === 'PLAYING' && !isPaused && isBallMagnetized.current && lastHitter.current === 'PLAYER' && (
             <motion.div 
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
@@ -936,12 +1015,18 @@ export default function App() {
             >
               <div className="bg-orange-500/20 backdrop-blur-[2px] px-6 py-3 rounded-full border border-orange-500/30">
                 <p className="text-orange-400 font-mono text-xs uppercase tracking-[0.3em] font-bold animate-pulse">
-                  Press Space to Release Ball
+                  Space / tap to release ball
                 </p>
               </div>
             </motion.div>
           )}
 
+          {gameState === 'PLAYING' && isPaused && (
+            <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/80 rounded-xl">
+              <h2 className="text-2xl font-bold mb-4">Paused</h2>
+              <button className="px-6 py-3 bg-white text-black rounded-full font-bold" onClick={() => pause(false)}>Resume game</button>
+            </div>
+          )}
           {gameState === 'START' && (
             <motion.div 
               initial={{ opacity: 0 }}
@@ -949,11 +1034,11 @@ export default function App() {
               exit={{ opacity: 0 }}
               className="absolute inset-0 flex flex-col items-center justify-center bg-black/80 backdrop-blur-sm rounded-xl"
             >
-              <h1 className="text-7xl font-black italic uppercase tracking-tighter mb-4 text-transparent bg-clip-text bg-gradient-to-r from-cyan-400 to-pink-500">
+              <h1 className="start-title font-black italic uppercase tracking-tighter mb-4 text-transparent bg-clip-text bg-gradient-to-r from-cyan-400 to-pink-500">
                 Ponganoid
               </h1>
-              <p className="text-white/60 mb-8 font-mono text-sm">USE W/S OR ARROW KEYS TO MOVE</p>
-              <div className="flex flex-col gap-4">
+              <p className="instructions text-white/60 font-mono">W/S OR ARROWS · DRAG TO MOVE</p>
+              <div className="start-buttons flex flex-col gap-2">
                 <button
                   onClick={() => startGame(false)}
                   className="group relative px-8 py-4 bg-white text-black font-bold uppercase tracking-widest rounded-full hover:scale-105 transition-transform flex items-center gap-3"
@@ -981,7 +1066,7 @@ export default function App() {
             <motion.div 
               initial={{ opacity: 0, scale: 0.9 }}
               animate={{ opacity: 1, scale: 1 }}
-              className="absolute inset-0 flex flex-col items-center justify-center bg-black/90 backdrop-blur-md rounded-xl"
+              className="game-over absolute inset-0 flex flex-col items-center justify-center bg-black/90 backdrop-blur-md rounded-xl"
             >
               <Trophy size={64} className={winner === 'PLAYER' ? 'text-cyan-400 mb-4' : 'text-pink-500 mb-4'} />
               <h2 className="text-5xl font-black uppercase italic mb-2">
@@ -989,7 +1074,7 @@ export default function App() {
               </h2>
               <p className="text-white/50 mb-8 font-mono">Final Score: {playerScore} - {aiScore}</p>
               <button
-                onClick={startGame}
+                onClick={() => startGame(false)}
                 className="px-8 py-4 border-2 border-white/20 hover:border-white hover:bg-white hover:text-black font-bold uppercase tracking-widest rounded-full transition-all flex items-center gap-3"
               >
                 <RotateCcw size={20} />
@@ -1001,14 +1086,14 @@ export default function App() {
       </motion.div>
 
       {/* Footer Info */}
-      <div className="mt-8 flex gap-8 text-[10px] uppercase tracking-[0.2em] font-bold text-white/30">
+      <div className="game-footer flex flex-wrap justify-center gap-x-6 gap-y-1 text-[10px] uppercase tracking-wider font-bold text-white/50">
         <div className="flex items-center gap-2">
           <div className="w-2 h-2 rounded-full bg-cyan-400 animate-pulse" />
-          Highest score in level 10 wins
+          Space / tap: serve, release, fire · P: pause
         </div>
         <div className="flex items-center gap-2">
           <div className="w-2 h-2 rounded-full bg-pink-500 animate-pulse" />
-          Bricks: +1 Point
+          Bricks: +1 Point · Highest score in level 10 wins
         </div>
       </div>
     </div>
